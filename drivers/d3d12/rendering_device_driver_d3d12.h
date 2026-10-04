@@ -58,6 +58,8 @@ struct IDXGISwapChain3;
 
 // Design principles:
 // - D3D12 structs are zero-initialized and fields not requiring a non-zero value are omitted (except in cases where expresivity reasons apply).
+class AMDFSRBackendD3D12;
+
 class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 	/*****************/
 	/**** GENERIC ****/
@@ -920,6 +922,22 @@ public:
 
 	virtual void set_object_name(ObjectType p_type, ID p_driver_id, const String &p_name) override final;
 	virtual uint64_t get_resource_native_handle(DriverResource p_type, ID p_driver_id) override final;
+
+	/*****************/
+	/**** AMD FSR ****/
+	/*****************/
+
+	// Used by AMDFSRBackendD3D12 to let the FidelityFX runtime record into Godot's command lists.
+	ID3D12Device *get_d3d12_device() const { return device.Get(); }
+	bool is_enhanced_barriers_supported() const { return barrier_capabilities.enhanced_barriers_supported; }
+	ID3D12GraphicsCommandList *command_buffer_get_d3d12_list(CommandBufferID p_cmd_buffer) const;
+	// Forgets the descriptor heaps, root signatures and pipelines bound on the list.
+	void command_buffer_invalidate_bound_state(CommandBufferID p_cmd_buffer);
+
+private:
+	AMDFSRBackendD3D12 *amd_fsr_backend = nullptr;
+
+public:
 	virtual uint64_t get_total_memory_used() override final;
 	virtual uint64_t get_lazily_memory_used() override final;
 	virtual uint64_t limit_get(Limit p_limit) override final;

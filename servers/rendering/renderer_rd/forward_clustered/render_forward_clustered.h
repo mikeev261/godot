@@ -33,6 +33,7 @@
 #include "core/templates/paged_allocator.h"
 #include "servers/rendering/multi_uma_buffer.h"
 #include "servers/rendering/renderer_rd/cluster_builder_rd.h"
+#include "servers/rendering/renderer_rd/effects/amd_fsr.h"
 #include "servers/rendering/renderer_rd/effects/fsr2.h"
 #include "servers/rendering/renderer_rd/effects/motion_vectors_store.h"
 #include "servers/rendering/renderer_rd/effects/ss_effects.h"
@@ -96,6 +97,9 @@ public:
 	private:
 		RenderSceneBuffersRD *render_buffers = nullptr;
 		RendererRD::FSR2Context *fsr2_context = nullptr;
+		RendererRD::AMDFSRContext *amd_fsr_context = nullptr;
+		bool amd_fsr_failed = false;
+		bool amd_fsr_reset = false;
 #ifdef METAL_MFXTEMPORAL_ENABLED
 		RendererRD::MFXTemporalContext *mfx_temporal_context = nullptr;
 #endif
@@ -144,6 +148,16 @@ public:
 
 		void ensure_fsr2(RendererRD::FSR2Effect *p_effect);
 		RendererRD::FSR2Context *get_fsr2_context() const { return fsr2_context; }
+
+		// False if the FFX runtime could not create a context; the caller falls back to FSR2.
+		bool ensure_amd_fsr(RendererRD::AMDFSREffect *p_effect);
+		RendererRD::AMDFSRContext *get_amd_fsr_context() const { return amd_fsr_context; }
+		// True only for the first dispatch on a new context.
+		bool take_amd_fsr_reset() {
+			bool reset = amd_fsr_reset;
+			amd_fsr_reset = false;
+			return reset;
+		}
 
 #ifdef METAL_MFXTEMPORAL_ENABLED
 		bool ensure_mfx_temporal(RendererRD::MFXTemporalEffect *p_effect);
@@ -744,6 +758,7 @@ private:
 
 	RendererRD::TAA *taa = nullptr;
 	RendererRD::FSR2Effect *fsr2_effect = nullptr;
+	RendererRD::AMDFSREffect *amd_fsr_effect = nullptr;
 	RendererRD::SSEffects *ss_effects = nullptr;
 
 #ifdef METAL_MFXTEMPORAL_ENABLED

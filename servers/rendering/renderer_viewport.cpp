@@ -39,6 +39,7 @@
 #include "servers/display/display_server.h"
 #include "servers/rendering/renderer_canvas_cull.h"
 #include "servers/rendering/renderer_compositor.h"
+#include "servers/rendering/renderer_rd/effects/amd_fsr.h"
 #include "servers/rendering/renderer_scene_occlusion_cull.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_method.h"
@@ -159,7 +160,7 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 				WARN_PRINT_ONCE("MetalFX and FSR upscaling are not supported in the Compatibility renderer. Falling back to bilinear scaling.");
 			}
 
-			if ((scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_FSR || scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_FSR2 || scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL) && OS::get_singleton()->get_current_rendering_method() == "mobile") {
+			if ((scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_FSR || scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_FSR2 || scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL || scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_AMD_FSR) && OS::get_singleton()->get_current_rendering_method() == "mobile") {
 				scaling_3d_mode = RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR;
 				scaling_type = RSE::scaling_3d_mode_type(scaling_3d_mode);
 				WARN_PRINT_ONCE("MetalFX temporal and FSR upscaling are not supported in the Mobile renderer. Falling back to bilinear scaling.");
@@ -184,6 +185,18 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 			}
 
 			RSE::ViewportMSAA msaa_3d = p_viewport->msaa_3d;
+
+			if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_AMD_FSR) {
+				if (!RendererRD::AMDFSREffect::is_available()) {
+					scaling_3d_mode = RSE::VIEWPORT_SCALING_3D_MODE_FSR2;
+					scaling_type = RSE::scaling_3d_mode_type(scaling_3d_mode);
+					WARN_PRINT_ONCE("AMD FSR needs the Direct3D 12 rendering driver and the AMD FidelityFX DLLs next to the executable. Falling back to FSR 2.2.");
+				} else if (msaa_3d != RSE::VIEWPORT_MSAA_DISABLED) {
+					// The upscaler is the anti-aliasing; its camera motion vectors are not written to MSAA buffers.
+					WARN_PRINT_ONCE("AMD FSR does not support 3D MSAA. Disabling 3D MSAA internally.");
+					msaa_3d = RSE::VIEWPORT_MSAA_DISABLED;
+				}
+			}
 
 			// If MetalFX Temporal upscaling is supported, verify limits.
 			if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL) {
@@ -243,6 +256,7 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 				case RSE::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL:
 				case RSE::VIEWPORT_SCALING_3D_MODE_FSR:
 				case RSE::VIEWPORT_SCALING_3D_MODE_FSR2:
+				case RSE::VIEWPORT_SCALING_3D_MODE_AMD_FSR:
 					target_width = p_viewport->size.width;
 					target_height = p_viewport->size.height;
 					render_width = MAX(target_width * scaling_3d_scale, 1.0); // target_width / (target_width * scaling)
@@ -1034,6 +1048,10 @@ void RendererViewport::viewport_set_scaling_3d_mode(RID p_viewport, RSE::Viewpor
 		}
 		if (p_mode == RSE::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL) {
 			WARN_PRINT_ONCE_ED("MetalFX Temporal 3D scaling is only available when using the Forward+ renderer.");
+			return;
+		}
+		if (p_mode == RSE::VIEWPORT_SCALING_3D_MODE_AMD_FSR) {
+			WARN_PRINT_ONCE_ED("AMD FSR 3D scaling is only available when using the Forward+ renderer.");
 			return;
 		}
 	}

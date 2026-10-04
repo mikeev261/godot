@@ -33,6 +33,7 @@
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
 #include "core/os/os.h"
+#include "drivers/d3d12/amd_fsr_d3d12.h"
 #include "drivers/d3d12/d3d12_hooks.h"
 #include "drivers/d3d12/rendering_context_driver_d3d12.h"
 
@@ -2647,6 +2648,16 @@ void RenderingDeviceDriverD3D12::command_buffer_end(CommandBufferID p_cmd_buffer
 	HRESULT res = cmd_buf_info->cmd_list->Close();
 
 	ERR_FAIL_COND_MSG(!SUCCEEDED(res), "Close failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+	command_buffer_invalidate_bound_state(p_cmd_buffer);
+}
+
+ID3D12GraphicsCommandList *RenderingDeviceDriverD3D12::command_buffer_get_d3d12_list(CommandBufferID p_cmd_buffer) const {
+	const CommandBufferInfo *cmd_buf_info = (const CommandBufferInfo *)p_cmd_buffer.id;
+	return cmd_buf_info->cmd_list.Get();
+}
+
+void RenderingDeviceDriverD3D12::command_buffer_invalidate_bound_state(CommandBufferID p_cmd_buffer) {
+	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	cmd_buf_info->graphics_pso = nullptr;
 	cmd_buf_info->graphics_root_signature_crc = 0;
 	cmd_buf_info->compute_pso = nullptr;
@@ -5674,6 +5685,10 @@ void RenderingDeviceDriverD3D12::begin_segment(uint32_t p_frame_index, uint32_t 
 	frames_drawn = p_frames_drawn;
 	allocator->SetCurrentFrameIndex(p_frames_drawn);
 
+	if (amd_fsr_backend) {
+		amd_fsr_backend->begin_frame(p_frames_drawn, frames.size());
+	}
+
 	segment_begun = true;
 }
 
@@ -5945,6 +5960,14 @@ RenderingDeviceDriverD3D12::RenderingDeviceDriverD3D12(RenderingContextDriverD3D
 }
 
 RenderingDeviceDriverD3D12::~RenderingDeviceDriverD3D12() {
+	if (amd_fsr_backend) {
+		if (RendererRD::AMDFSRBackend::get_singleton() == amd_fsr_backend) {
+			RendererRD::AMDFSRBackend::set_singleton(nullptr);
+		}
+		memdelete(amd_fsr_backend);
+		amd_fsr_backend = nullptr;
+	}
+
 	rtv_descriptor_heap_pool.free(null_rtv_alloc);
 
 	for (FrameInfo &f : frames) {
@@ -6412,6 +6435,14 @@ Error RenderingDeviceDriverD3D12::initialize(uint32_t p_device_index, uint32_t p
 
 	err = _initialize_command_signatures();
 	ERR_FAIL_COND_V(err != OK, ERR_CANT_CREATE);
+
+	// The first device is the one that renders viewports; local devices (lightmapper,
+	// shader baking) come later and must not take it over. The FidelityFX runtime is
+	// only loaded once a viewport asks for AMD FSR.
+	if (RendererRD::AMDFSRBackend::get_singleton() == nullptr) {
+		amd_fsr_backend = memnew(AMDFSRBackendD3D12(this));
+		RendererRD::AMDFSRBackend::set_singleton(amd_fsr_backend);
+	}
 
 	return OK;
 }

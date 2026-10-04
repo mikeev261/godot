@@ -298,6 +298,13 @@ Error EditorExportPlatformWindows::export_project(const Ref<EditorExportPreset> 
 		if (da->file_exists(template_path.get_base_dir().path_join("WinPixEventRuntime." + arch + ".dll"))) {
 			da->copy(template_path.get_base_dir().path_join("WinPixEventRuntime." + arch + ".dll"), path.get_base_dir().path_join("WinPixEventRuntime.dll"), get_chmod_flags());
 		}
+		// AMD FSR runtime (AMD FSR SDK signed DLLs), when it sits next to the template.
+		const char *amd_fsr_libs[] = { "amd_fidelityfx_loader_dx12.dll", "amd_fidelityfx_upscaler_dx12.dll" };
+		for (const char *amd_fsr_lib : amd_fsr_libs) {
+			if (da->file_exists(template_path.get_base_dir().path_join(amd_fsr_lib))) {
+				da->copy(template_path.get_base_dir().path_join(amd_fsr_lib), path.get_base_dir().path_join(amd_fsr_lib), get_chmod_flags());
+			}
+		}
 	}
 
 	// Export project.

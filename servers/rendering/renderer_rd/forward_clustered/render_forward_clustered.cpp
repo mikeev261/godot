@@ -90,6 +90,15 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_fsr2(Rende
 	}
 }
 
+bool RenderForwardClustered::RenderBufferDataForwardClustered::ensure_amd_fsr(RendererRD::AMDFSREffect *p_effect) {
+	if (amd_fsr_context == nullptr && !amd_fsr_failed) {
+		amd_fsr_context = p_effect->create_context(render_buffers->get_internal_size(), render_buffers->get_target_size());
+		amd_fsr_failed = amd_fsr_context == nullptr;
+		amd_fsr_reset = true;
+	}
+	return amd_fsr_context != nullptr;
+}
+
 #ifdef METAL_MFXTEMPORAL_ENABLED
 bool RenderForwardClustered::RenderBufferDataForwardClustered::ensure_mfx_temporal(RendererRD::MFXTemporalEffect *p_effect) {
 	if (mfx_temporal_context == nullptr) {
@@ -128,6 +137,12 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::free_data() {
 		memdelete(fsr2_context);
 		fsr2_context = nullptr;
 	}
+
+	if (amd_fsr_context) {
+		memdelete(amd_fsr_context);
+		amd_fsr_context = nullptr;
+	}
+	amd_fsr_failed = false;
 
 #ifdef METAL_MFXTEMPORAL_ENABLED
 	if (mfx_temporal_context) {
@@ -1784,6 +1799,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		SCALE_NONE,
 		SCALE_FSR2,
 		SCALE_MFX,
+		SCALE_AMD_FSR,
 	} scale_type = SCALE_NONE;
 
 	switch (rb->get_scaling_3d_mode()) {
@@ -1796,6 +1812,14 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 #else
 			scale_type = SCALE_NONE;
 #endif
+			break;
+		case RSE::VIEWPORT_SCALING_3D_MODE_AMD_FSR:
+			// Godot's own FSR 2.2 takes over if the FFX runtime refuses this viewport.
+			if (rb_data.is_valid() && rb->get_view_count() == 1 && rb_data->ensure_amd_fsr(amd_fsr_effect)) {
+				scale_type = SCALE_AMD_FSR;
+			} else {
+				scale_type = SCALE_FSR2;
+			}
 			break;
 		default:
 			break;
@@ -2227,7 +2251,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		RD::get_singleton()->draw_command_end_label();
 
 		if (using_motion_pass) {
-			if (scale_type == SCALE_MFX) {
+			if (scale_type == SCALE_MFX || scale_type == SCALE_AMD_FSR) {
+				// Neither upscaler can derive camera motion for pixels that have no motion vector, so write it everywhere.
 				motion_vectors_store->process(rb,
 						p_render_data->scene_data->cam_projection, p_render_data->scene_data->cam_transform,
 						p_render_data->scene_data->prev_cam_projection, p_render_data->scene_data->prev_cam_transform);
@@ -2534,6 +2559,38 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 			RD::get_singleton()->draw_command_end_label();
 #endif
+		} else if (scale_type == SCALE_AMD_FSR) {
+			RID exposure;
+			if (RSG::camera_attributes->camera_attributes_uses_auto_exposure(p_render_data->camera_attributes)) {
+				exposure = luminance->get_current_luminance_buffer(rb);
+			}
+
+			RD::get_singleton()->draw_command_begin_label("AMD FSR");
+			RENDER_TIMESTAMP("AMD FSR");
+
+			real_t fov = p_render_data->scene_data->cam_projection.get_fov();
+			real_t aspect = p_render_data->scene_data->cam_projection.get_aspect();
+
+			RendererRD::AMDFSREffect::Params params;
+			params.color = rb->get_internal_texture(0);
+			params.depth = rb->get_depth_texture(0);
+			params.velocity = rb->get_velocity_buffer(false, 0);
+			params.exposure = exposure;
+			params.output = rb->get_upscaled_texture(0);
+			params.internal_size = rb->get_internal_size();
+			params.target_size = rb->get_target_size();
+			// Same conventions as the FSR2 path above.
+			params.jitter = p_render_data->scene_data->taa_jitter * Vector2(rb->get_internal_size()) * 0.5f;
+			params.sharpness = CLAMP(1.0f - (rb->get_fsr_sharpness() / 2.0f), 0.0f, 1.0f);
+			params.delta_time = float(time_step);
+			params.z_near = p_render_data->scene_data->z_near;
+			params.z_far = p_render_data->scene_data->z_far;
+			params.fovy = p_render_data->scene_data->cam_projection.get_fovy(fov, 1.0 / aspect);
+			params.reset = rb_data->take_amd_fsr_reset();
+
+			amd_fsr_effect->upscale(rb_data->get_amd_fsr_context(), params);
+
+			RD::get_singleton()->draw_command_end_label();
 		} else if (using_taa) {
 			RD::get_singleton()->draw_command_begin_label("TAA");
 			RENDER_TIMESTAMP("TAA");
@@ -5238,9 +5295,10 @@ RenderForwardClustered::RenderForwardClustered() {
 
 	taa = memnew(RendererRD::TAA);
 	fsr2_effect = memnew(RendererRD::FSR2Effect);
+	amd_fsr_effect = memnew(RendererRD::AMDFSREffect);
 	ss_effects = memnew(RendererRD::SSEffects);
-#ifdef METAL_MFXTEMPORAL_ENABLED
 	motion_vectors_store = memnew(RendererRD::MotionVectorsStore);
+#ifdef METAL_MFXTEMPORAL_ENABLED
 	mfx_temporal_effect = memnew(RendererRD::MFXTemporalEffect);
 #endif
 }
@@ -5261,17 +5319,22 @@ RenderForwardClustered::~RenderForwardClustered() {
 		fsr2_effect = nullptr;
 	}
 
+	if (amd_fsr_effect) {
+		memdelete(amd_fsr_effect);
+		amd_fsr_effect = nullptr;
+	}
+
 #ifdef METAL_MFXTEMPORAL_ENABLED
 	if (mfx_temporal_effect) {
 		memdelete(mfx_temporal_effect);
 		mfx_temporal_effect = nullptr;
 	}
+#endif
 
 	if (motion_vectors_store) {
 		memdelete(motion_vectors_store);
 		motion_vectors_store = nullptr;
 	}
-#endif
 
 	RD::get_singleton()->free_rid(shadow_sampler);
 	RSG::light_storage->directional_shadow_atlas_set_size(0);
