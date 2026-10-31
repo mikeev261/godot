@@ -63,6 +63,8 @@ void RenderSceneBuffersRD::_bind_methods() {
 	// Access to some core buffers so users don't need to know their names.
 	ClassDB::bind_method(D_METHOD("get_color_texture", "msaa"), &RenderSceneBuffersRD::_get_color_texture, DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("get_color_layer", "layer", "msaa"), &RenderSceneBuffersRD::_get_color_layer, DEFVAL(false));
+	ClassDB::bind_method(D_METHOD("get_output_color_texture"), &RenderSceneBuffersRD::_get_output_color_texture);
+	ClassDB::bind_method(D_METHOD("get_output_color_layer", "layer"), &RenderSceneBuffersRD::_get_output_color_layer);
 	ClassDB::bind_method(D_METHOD("get_depth_texture", "msaa"), &RenderSceneBuffersRD::_get_depth_texture, DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("get_depth_layer", "layer", "msaa"), &RenderSceneBuffersRD::_get_depth_layer, DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("get_velocity_texture", "msaa"), &RenderSceneBuffersRD::_get_velocity_texture, DEFVAL(false));

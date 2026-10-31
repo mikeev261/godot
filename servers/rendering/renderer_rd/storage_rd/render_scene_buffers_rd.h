@@ -315,6 +315,10 @@ public:
 	_FORCE_INLINE_ RID get_upscaled_texture(const uint32_t p_layer) {
 		return get_texture_slice(RB_SCOPE_BUFFERS, RB_TEX_COLOR_UPSCALED, p_layer, 0);
 	}
+	// Whether a temporal upscaler writes the upscaled texture, which post-processing then reads instead of the internal one.
+	_FORCE_INLINE_ bool uses_upscaled_texture() const {
+		return has_upscaled_texture() && (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_FSR2 || scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL || scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_AMD_FSR);
+	}
 
 	// Velocity, currently only used by TAA (Clustered) but we'll be using this in other places soon too.
 
@@ -367,6 +371,18 @@ private:
 	// For color and depth as exposed to extensions:
 	// - we need separately named functions to access the layer,
 	// - we don't output an error for missing buffers but just return an empty RID.
+	RID _get_output_color_texture() {
+		if (uses_upscaled_texture()) {
+			return get_upscaled_texture();
+		}
+		return has_internal_texture() ? get_internal_texture() : RID();
+	}
+	RID _get_output_color_layer(const uint32_t p_layer) {
+		if (uses_upscaled_texture()) {
+			return get_upscaled_texture(p_layer);
+		}
+		return has_internal_texture() ? get_internal_texture(p_layer) : RID();
+	}
 	RID _get_color_texture(bool p_msaa = false) {
 		if (p_msaa) {
 			if (has_texture(RB_SCOPE_BUFFERS, RB_TEX_COLOR_MSAA)) {

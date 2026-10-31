@@ -886,7 +886,8 @@ void RenderForwardMobile::_render_scene(RenderDataRD *p_render_data, const Color
 
 	bool ce_has_post_opaque = _has_compositor_effect(RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_OPAQUE, p_render_data);
 	bool ce_has_pre_transparent = _has_compositor_effect(RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_PRE_TRANSPARENT, p_render_data);
-	bool ce_has_post_transparent = _has_compositor_effect(RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_TRANSPARENT, p_render_data);
+	// Mobile has no temporal upscaler, so post-upscale effects run straight after post-transparent ones.
+	bool ce_has_post_transparent = _has_compositor_effect(RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_TRANSPARENT, p_render_data) || _has_compositor_effect(RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_UPSCALE, p_render_data);
 
 	if (ce_has_post_opaque) {
 		// As we're doing opaque and sky in subpasses we don't support this *yet*
@@ -1379,6 +1380,7 @@ void RenderForwardMobile::_render_scene(RenderDataRD *p_render_data, const Color
 
 		if (ce_has_post_transparent) {
 			_process_compositor_effects(RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_TRANSPARENT, p_render_data);
+			_process_compositor_effects(RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_UPSCALE, p_render_data);
 		}
 
 		// If we need extra effects we do this in its own pass

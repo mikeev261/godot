@@ -89,7 +89,10 @@
 		<constant name="EFFECT_CALLBACK_TYPE_POST_TRANSPARENT" value="4" enum="EffectCallbackType">
 			The callback is called after our transparent rendering pass, but before any built-in post-processing effects and output to our render target.
 		</constant>
-		<constant name="EFFECT_CALLBACK_TYPE_MAX" value="5" enum="EffectCallbackType">
+		<constant name="EFFECT_CALLBACK_TYPE_POST_UPSCALE" value="5" enum="EffectCallbackType">
+			The callback is called after the temporal upscaler (AMD FSR, FSR 2 or MetalFX Temporal) or TAA has run, but before any built-in post-processing effects and output to our render target. Draw into [method RenderSceneBuffersRD.get_output_color_texture], which is at the output resolution when a temporal upscaler is active, so effects drawn here are not resampled or accumulated by it. The depth buffer stays at the internal resolution. Without a temporal upscaler this runs straight after [constant EFFECT_CALLBACK_TYPE_POST_TRANSPARENT].
+		</constant>
+		<constant name="EFFECT_CALLBACK_TYPE_MAX" value="6" enum="EffectCallbackType">
 			Represents the size of the [enum EffectCallbackType] enum.
 		</constant>
 	</constants>

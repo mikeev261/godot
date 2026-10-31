@@ -108,6 +108,19 @@
 				Returns the applied 3D MSAA mode for this viewport.
 			</description>
 		</method>
+		<method name="get_output_color_layer">
+			<return type="RID" />
+			<param index="0" name="layer" type="int" />
+			<description>
+				Returns the specified layer of the color texture that post-processing reads: the upscaled texture when a temporal upscaler is active, otherwise the internal color texture. See [method get_output_color_texture].
+			</description>
+		</method>
+		<method name="get_output_color_texture">
+			<return type="RID" />
+			<description>
+				Returns the color texture that post-processing reads: the upscaled texture, at the output resolution, when a temporal upscaler (AMD FSR, FSR 2 or MetalFX Temporal) is active, otherwise the internal color texture. Use it from [constant RenderingServer.COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_UPSCALE] effects.
+			</description>
+		</method>
 		<method name="get_render_target" qualifiers="const">
 			<return type="RID" />
 			<description>
