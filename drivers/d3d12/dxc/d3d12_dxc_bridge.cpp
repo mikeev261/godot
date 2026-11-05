@@ -32,12 +32,14 @@
 
 #include <spirv_hlsl.hpp>
 
-#define WIN32_LEAN_AND_MEAN
+// clang-format off
+// Order matters: dxcapi.h needs the OLE types (IUnknown, BSTR), which the build's WIN32_LEAN_AND_MEAN leaves out of windows.h.
 #include <windows.h>
-
-#include <dxcapi.h>
 #include <objbase.h>
+#include <oleauto.h>
+#include <dxcapi.h>
 #include <wrl/client.h>
+// clang-format on
 
 #include <mutex>
 
