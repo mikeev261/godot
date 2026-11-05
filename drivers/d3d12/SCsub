@@ -176,7 +176,44 @@ env_thirdparty.Prepend(
 )
 
 env_thirdparty.add_source_files(thirdparty_obj, "#thirdparty/d3d12ma/D3D12MemAlloc.cpp")
+
+# SPIRV-Cross (HLSL backend) and the DXC bridge, for ray-query shaders that NIR-DXIL cannot translate.
+# SPIRV-Cross reports errors with C++ exceptions, so this part is built with them enabled.
+env_dxc = env.Clone()
+if env.msvc:
+    env_dxc["CPPDEFINES"] = [
+        d for d in env_dxc["CPPDEFINES"] if not (d == "_HAS_EXCEPTIONS" or (isinstance(d, tuple) and d[0] == "_HAS_EXCEPTIONS"))
+    ]
+    env_dxc.Append(CXXFLAGS=["/EHsc"])
+else:
+    if "-fno-exceptions" in env_dxc["CXXFLAGS"]:
+        env_dxc["CXXFLAGS"].remove("-fno-exceptions")
+    env_dxc.Append(CXXFLAGS=["-fexceptions"])
+env_dxc.Prepend(
+    CPPPATH=[
+        "#thirdparty/spirv-cross",
+        "#thirdparty/spirv-cross/include",
+        "#thirdparty/spirv-headers/include/spirv/unified1",
+        "#thirdparty/dxc/include",
+    ]
+)
+env_dxc_thirdparty = env_dxc.Clone()
+env_dxc_thirdparty.disable_warnings()
+spirv_cross_sources = [
+    "spirv_cfg.cpp",
+    "spirv_cross.cpp",
+    "spirv_cross_parsed_ir.cpp",
+    "spirv_cross_util.cpp",
+    "spirv_glsl.cpp",
+    "spirv_hlsl.cpp",
+    "spirv_parser.cpp",
+]
+env_dxc_thirdparty.add_source_files(thirdparty_obj, ["#thirdparty/spirv-cross/" + f for f in spirv_cross_sources])
 env.drivers_sources += thirdparty_obj
+
+dxc_bridge_obj = []
+env_dxc.add_source_files(dxc_bridge_obj, "dxc/*.cpp")
+env.drivers_sources += dxc_bridge_obj
 
 # Godot source files.
 

@@ -4,6 +4,7 @@ if __name__ != "__main__":
     raise SystemExit(f'Utility script "{__file__}" should not be used as a module!')
 
 import argparse
+import hashlib
 import os
 import shutil
 import subprocess
@@ -43,16 +44,23 @@ pix_folder = os.path.join(deps_folder, "pix")
 # Check for latest version: https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12 (check downloaded filename)
 # After updating this, remember to change the default value of the `rendering/rendering_device/d3d12/agility_sdk_version`
 # project setting to match the minor version (e.g. for `1.618.5`, it should be `618`).
-agility_sdk_version = "1.618.5"
+agility_sdk_version = "1.722.0-preview"
 agility_sdk_archive = os.path.join(deps_folder, f"Agility_SDK_{agility_sdk_version}.nupkg")
 agility_sdk_folder = os.path.join(deps_folder, "agility_sdk")
+# DirectX Shader Compiler, for ray-query shaders (SPIR-V -> HLSL -> DXIL). Must support the shader models the
+# Agility SDK above exposes: v1.10.2605.37 is the Shader Model 6.10 preview build named for Agility SDK 1.722.
+dxc_version = "v1.10.2605.37"
+dxc_asset = "dxc_2026_08_11.zip"
+dxc_sha256 = "18da85ccac4d1736209bad960f0a124928a5c5a6046882e331c605d66744a889"
+dxc_archive = os.path.join(deps_folder, dxc_asset)
+dxc_folder = os.path.join(deps_folder, "dxc")
 
 # Create dependencies folder
 if not os.path.exists(deps_folder):
     os.makedirs(deps_folder)
 
 # Mesa NIR
-color_print(f"{Ansi.BOLD}[1/3] Mesa NIR")
+color_print(f"{Ansi.BOLD}[1/4] Mesa NIR")
 for arch in [
     "arm64-llvm",
     "arm64-msvc",
@@ -94,7 +102,7 @@ gendef = shutil.which("x86_64-w64-mingw32-gendef", path=pathstr) or shutil.which
 dlltool = shutil.which("x86_64-w64-mingw32-dlltool", path=pathstr) or shutil.which("dlltool", path=pathstr) or ""
 has_mingw = gendef != "" and dlltool != ""
 
-color_print(f"{Ansi.BOLD}[2/3] WinPixEventRuntime")
+color_print(f"{Ansi.BOLD}[2/4] WinPixEventRuntime")
 if os.path.isfile(pix_archive):
     os.remove(pix_archive)
 print(f"Downloading WinPixEventRuntime {pix_version} ...")
@@ -127,7 +135,7 @@ else:
 print(f"WinPixEventRuntime {pix_version} installed successfully.\n")
 
 # DirectX 12 Agility SDK
-color_print(f"{Ansi.BOLD}[3/3] DirectX 12 Agility SDK")
+color_print(f"{Ansi.BOLD}[3/4] DirectX 12 Agility SDK")
 if os.path.isfile(agility_sdk_archive):
     os.remove(agility_sdk_archive)
 print(f"Downloading DirectX 12 Agility SDK {agility_sdk_version} ...")
@@ -141,6 +149,27 @@ print(f"Extracting DirectX 12 Agility SDK {agility_sdk_version} to {agility_sdk_
 shutil.unpack_archive(agility_sdk_archive, agility_sdk_folder, "zip")
 os.remove(agility_sdk_archive)
 print(f"DirectX 12 Agility SDK {agility_sdk_version} installed successfully.\n")
+
+# DirectX Shader Compiler
+color_print(f"{Ansi.BOLD}[4/4] DirectX Shader Compiler")
+if os.path.isfile(dxc_archive):
+    os.remove(dxc_archive)
+print(f"Downloading DirectX Shader Compiler {dxc_version} ...")
+urllib.request.urlretrieve(
+    f"https://github.com/microsoft/DirectXShaderCompiler/releases/download/{dxc_version}/{dxc_asset}", dxc_archive
+)
+with open(dxc_archive, "rb") as f:
+    dxc_got_sha256 = hashlib.sha256(f.read()).hexdigest()
+if dxc_got_sha256 != dxc_sha256:
+    os.remove(dxc_archive)
+    raise SystemExit(f"{dxc_asset}: SHA-256 {dxc_got_sha256} does not match {dxc_sha256}")
+if os.path.exists(dxc_folder):
+    print(f"Removing existing local DirectX Shader Compiler installation in {dxc_folder} ...")
+    shutil.rmtree(dxc_folder)
+print(f"Extracting DirectX Shader Compiler {dxc_version} to {dxc_folder} ...")
+shutil.unpack_archive(dxc_archive, dxc_folder, "zip")
+os.remove(dxc_archive)
+print(f"DirectX Shader Compiler {dxc_version} installed successfully.\n")
 
 # Complete message
 color_print(f'{Ansi.GREEN}All Direct3D 12 SDK components were installed to "{deps_folder}" successfully!')

@@ -31,6 +31,7 @@
 #include "rendering_shader_container_d3d12.h"
 
 #include "core/templates/sort_array.h"
+#include "drivers/d3d12/dxc/d3d12_dxc_bridge.h"
 #include "drivers/d3d12/dxil_hash.h"
 
 #include <drivers/d3d12/godot_d3d12ma.h>
@@ -660,6 +661,11 @@ bool RenderingShaderContainerD3D12::_generate_root_signature(BitField<RenderingD
 				case RDC::UNIFORM_TYPE_INPUT_ATTACHMENT: {
 					range_type = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
 				} break;
+				case RDC::UNIFORM_TYPE_ACCELERATION_STRUCTURE: {
+					// RaytracingAccelerationStructure: an SRV whose location is the TLAS's GPU address.
+					range_type = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+					num_descriptors = MAX(1u, uniform.length);
+				} break;
 				default: {
 					DEV_ASSERT(false);
 				}
@@ -900,9 +906,129 @@ void RenderingShaderContainerD3D12::_set_from_shader_reflection_post(const Refle
 	}
 }
 
+#if NIR_ENABLED
+bool RenderingShaderContainerD3D12::_set_code_from_spirv_dxc(const ReflectShader &p_shader) {
+	const LocalVector<ReflectShaderStage> &p_spirv = p_shader.shader_stages;
+	reflection_data_d3d12.nir_runtime_data_root_param_idx = UINT32_MAX;
+
+	// Same register layout as the NIR path: one register number per (set, binding) for every register class, space 0.
+	std::vector<D3D12DxcBinding> bindings;
+	uint32_t binding_start = 0;
+	for (uint32_t i = 0; i < reflection_binding_set_uniforms_count.size(); i++) {
+		for (uint32_t j = 0; j < reflection_binding_set_uniforms_count[i]; j++) {
+			const ReflectionBindingData &uniform = reflection_binding_set_uniforms_data[binding_start + j];
+			D3D12DxcBinding b;
+			b.set = i;
+			b.binding = uniform.binding;
+			b.hlsl_register = i * GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER + uniform.binding * GODOT_NIR_BINDING_MULTIPLIER;
+			bindings.push_back(b);
+		}
+		binding_start += reflection_binding_set_uniforms_count[i];
+	}
+
+	BitField<RenderingDeviceCommons::ShaderStage> stages_processed = {};
+	shaders.resize(p_spirv.size());
+	for (uint32_t s = 0; s < p_spirv.size(); s++) {
+		const RenderingDeviceCommons::ShaderStage stage = p_spirv[s].shader_stage;
+		ERR_FAIL_COND_V_MSG(stage != RenderingDeviceCommons::SHADER_STAGE_COMPUTE, false,
+				"Inline ray tracing is only supported in compute shaders on Direct3D 12 (stage: " + String(RenderingDeviceCommons::SHADER_STAGE_NAMES[stage]) + ").");
+
+		Span<uint32_t> code = p_spirv[s].spirv();
+		D3D12DxcRequest request;
+		request.spirv = code.ptr();
+		request.spirv_word_count = code.size();
+		request.stage = stage;
+		request.bindings = bindings;
+		request.push_constant_register = ROOT_CONSTANT_REGISTER;
+		request.shader_model = DXC_RAY_QUERY_SHADER_MODEL;
+
+		D3D12DxcResult compiled = d3d12_dxc_compile(request);
+		if (!compiled.ok) {
+			if (!compiled.hlsl.empty()) {
+				print_verbose(String::utf8(compiled.hlsl.c_str()));
+			}
+			ERR_FAIL_V_MSG(false, "Ray-query shader translation failed: " + String::utf8(compiled.error.c_str()));
+		}
+		if (compiled.has_specialization_constants) {
+			WARN_PRINT_ONCE("Specialization constants in ray-query shaders keep their default values on Direct3D 12.");
+		}
+
+		Vector<uint8_t> dxil;
+		dxil.resize(compiled.dxil.size());
+		memcpy(dxil.ptrw(), compiled.dxil.data(), compiled.dxil.size());
+		RenderingDXIL::sign_bytecode(stage, dxil);
+
+		RenderingShaderContainer::Shader &shader = shaders.ptrw()[s];
+		uint32_t compressed_size = 0;
+		shader.shader_stage = stage;
+		shader.code_decompressed_size = dxil.size();
+		shader.code_compressed_bytes.resize(dxil.size());
+		bool compressed = compress_code(dxil.ptr(), dxil.size(), shader.code_compressed_bytes.ptrw(), &compressed_size, &shader.code_compression_flags);
+		ERR_FAIL_COND_V_MSG(!compressed, false, "Failed to compress DXIL of a ray-query shader.");
+		shader.code_compressed_bytes.resize(compressed_size);
+
+		stages_processed.set_flag(RenderingDeviceCommons::ShaderStage(1 << stage));
+	}
+
+	// What NIR reports while translating: which stages use each binding and its resource class.
+	binding_start = 0;
+	for (uint32_t i = 0; i < reflection_binding_set_uniforms_count.size(); i++) {
+		for (uint32_t j = 0; j < reflection_binding_set_uniforms_count[i]; j++) {
+			const ReflectionBindingData &uniform = reflection_binding_set_uniforms_data[binding_start + j];
+			ReflectionBindingDataD3D12 &uniform_d3d12 = reflection_binding_set_uniforms_data_d3d12.ptrw()[binding_start + j];
+			uniform_d3d12.dxil_stages = uniform.stages & uint32_t(stages_processed);
+			switch (uniform.type) {
+				case RDC::UNIFORM_TYPE_SAMPLER: {
+					uniform_d3d12.has_sampler = true;
+				} break;
+				case RDC::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE: {
+					uniform_d3d12.resource_class = RES_CLASS_SRV;
+					uniform_d3d12.has_sampler = true;
+				} break;
+				case RDC::UNIFORM_TYPE_TEXTURE:
+				case RDC::UNIFORM_TYPE_INPUT_ATTACHMENT:
+				case RDC::UNIFORM_TYPE_ACCELERATION_STRUCTURE: {
+					uniform_d3d12.resource_class = RES_CLASS_SRV;
+				} break;
+				case RDC::UNIFORM_TYPE_IMAGE: {
+					uniform_d3d12.resource_class = RES_CLASS_UAV;
+				} break;
+				case RDC::UNIFORM_TYPE_UNIFORM_BUFFER:
+				case RDC::UNIFORM_TYPE_UNIFORM_BUFFER_DYNAMIC: {
+					uniform_d3d12.resource_class = RES_CLASS_CBV;
+				} break;
+				case RDC::UNIFORM_TYPE_STORAGE_BUFFER:
+				case RDC::UNIFORM_TYPE_STORAGE_BUFFER_DYNAMIC: {
+					uniform_d3d12.resource_class = uniform.writable ? RES_CLASS_UAV : RES_CLASS_SRV;
+				} break;
+				default: {
+					ERR_FAIL_V_MSG(false, "Unsupported uniform type in a ray-query shader on Direct3D 12.");
+				}
+			}
+		}
+		binding_start += reflection_binding_set_uniforms_count[i];
+	}
+
+	if (reflection_data.push_constant_size > 0) {
+		reflection_data_d3d12.dxil_push_constant_stages = reflection_data.push_constant_stages_mask & uint32_t(stages_processed);
+	}
+
+	return _generate_root_signature(stages_processed);
+}
+#endif
+
 bool RenderingShaderContainerD3D12::_set_code_from_spirv(const ReflectShader &p_shader) {
 #if NIR_ENABLED
 	const LocalVector<ReflectShaderStage> &p_spirv = p_shader.shader_stages;
+
+	// Mesa's SPIR-V to DXIL has no ray tracing; such shaders go through SPIRV-Cross and DXC instead.
+	for (uint32_t i = 0; i < p_spirv.size(); i++) {
+		Span<uint32_t> code = p_spirv[i].spirv();
+		if (d3d12_dxc_spirv_needs_bridge(code.ptr(), code.size())) {
+			return _set_code_from_spirv_dxc(p_shader);
+		}
+	}
+
 	reflection_data_d3d12.nir_runtime_data_root_param_idx = UINT32_MAX;
 
 	for (int64_t i = 0; i < reflection_specialization_data.size(); i++) {

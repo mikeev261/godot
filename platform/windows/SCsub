@@ -178,6 +178,15 @@ if env["d3d12"]:
                 Copy("$TARGET", "$SOURCE"),
             )
 
+    # DXC compiles ray-query shaders (SPIR-V -> HLSL -> DXIL) at runtime; loaded on demand.
+    if env["dxc_path"] != "" and os.path.exists(env["dxc_path"]):
+        for dll in ["dxcompiler.dll", "dxil.dll"]:
+            env.CommandNoCache(
+                "#bin/" + dll,
+                env["dxc_path"] + "/bin/" + dxc_arch_subdir + "/" + dll,
+                Copy("$TARGET", "$SOURCE"),
+            )
+
     # PIX
     if env["use_pix"]:
         pix_dll = "WinPixEventRuntime.dll"

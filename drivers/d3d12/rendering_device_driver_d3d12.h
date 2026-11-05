@@ -111,6 +111,20 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 		bool aniso_filter_with_point_mip_supported = false;
 	};
 
+	struct RaytracingCapabilities {
+		D3D12_RAYTRACING_TIER tier = D3D12_RAYTRACING_TIER_NOT_SUPPORTED;
+		// Inline ray tracing (DXR 1.1) in compute shaders: tier 1.1, SM 6.5, enhanced barriers and dxcompiler.dll.
+		bool ray_query_supported = false;
+		bool dxc_available = false;
+		// Agility SDK 1.722 preview (D3D12_FEATURE_D3D12_OPTIONS_RAYTRACING2).
+		bool options_raytracing2_queried = false;
+		bool clusters_and_ptlas_supported = false;
+		bool template_instance_prefers_compressed1 = false;
+		// D3D12_FEATURE_D3D12_OPTIONS22.
+		bool shader_execution_reordering_actually_reorders = false;
+		bool raytracing_preview_enabled = false;
+	};
+
 	RenderingContextDriverD3D12 *context_driver = nullptr;
 	RenderingContextDriver::Device context_device;
 	Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
@@ -127,6 +141,8 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 	BarrierCapabilities barrier_capabilities;
 	MiscFeaturesSupport misc_features_support;
 	SamplerCapabilities sampler_capabilities;
+	RaytracingCapabilities raytracing_capabilities;
+	Microsoft::WRL::ComPtr<ID3D12Device5> device_5; // Only if ray tracing is supported.
 	RenderingShaderContainerFormatD3D12 shader_container_format;
 	String pipeline_cache_id;
 	D3D12_HEAP_TYPE dynamic_persistent_upload_heap = D3D12_HEAP_TYPE_UPLOAD;
@@ -841,6 +857,20 @@ public:
 
 	// ---- ACCELERATION STRUCTURES ----
 
+	struct AccelerationStructureInfo {
+		Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+		Microsoft::WRL::ComPtr<D3D12MA::Allocation> allocation;
+		D3D12_GPU_VIRTUAL_ADDRESS gpu_virtual_address = {};
+		D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {};
+		LocalVector<D3D12_RAYTRACING_GEOMETRY_DESC> geometries; // BLAS only; inputs points here.
+		uint64_t size = 0;
+		uint64_t scratch_size = 0;
+		uint32_t max_instance_count = 0; // TLAS only.
+	};
+
+	AccelerationStructureInfo *_acceleration_structure_allocate(const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS &p_inputs);
+
+public:
 	virtual AccelerationStructureID blas_create(VectorView<AccelerationStructureGeometry> p_geometries, BitField<AccelerationStructureFlagBits> p_flags) override final;
 	virtual AccelerationStructureID tlas_create(uint32_t p_max_instance_count, BitField<AccelerationStructureFlagBits> p_flags) override final;
 	virtual void acceleration_structure_instance_write(uint8_t *r_driver_instance, const AccelerationStructureInstance &p_instance) override final;
@@ -948,6 +978,7 @@ public:
 	virtual const FragmentDensityMapCapabilities &get_fragment_density_map_capabilities() override final;
 	virtual String get_api_name() const override final;
 	virtual String get_api_version() const override final;
+	virtual void get_raytracing_info(Dictionary &r_info) const override final;
 	virtual String get_pipeline_cache_uuid() const override final;
 	virtual const Capabilities &get_capabilities() const override final;
 	virtual const RenderingShaderContainerFormat &get_shader_container_format() const override final;

@@ -262,6 +262,11 @@ def get_opts():
             "Path to the Agility SDK distribution (optional for D3D12)",
             os.path.join(deps_folder, "agility_sdk"),
         ),
+        (
+            "dxc_path",
+            "Path to the DirectX Shader Compiler release (optional for D3D12, needed for ray-query shaders)",
+            os.path.join(deps_folder, "dxc"),
+        ),
         BoolVariable(
             "agility_sdk_multiarch",
             "Whether the Agility SDK DLLs will be stored in arch-specific subdirectories",

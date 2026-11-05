@@ -543,7 +543,8 @@ Error RenderingDevice::tlas_build(RID p_tlas, Span<AccelerationStructureInstance
 		rdd_instance.flags = rd_instance.flags;
 
 		if (rd_instance.blas.is_valid()) {
-			ERR_FAIL_COND_V_MSG(!rd_instance.hit_sbt_range, ERR_INVALID_PARAMETER, "Instance " + itos(i) + " has an invalid hit shader binding table range.");
+			// Ray queries do not use a shader binding table, so without a pipeline the range may be left empty (offset 0).
+			ERR_FAIL_COND_V_MSG(!rd_instance.hit_sbt_range && !has_feature(SUPPORTS_RAY_QUERY), ERR_INVALID_PARAMETER, "Instance " + itos(i) + " has an invalid hit shader binding table range.");
 
 			AccelerationStructure *blas = acceleration_structure_owner.get_or_null(rd_instance.blas);
 			ERR_FAIL_NULL_V(blas, ERR_INVALID_PARAMETER);
@@ -7857,6 +7858,15 @@ String RenderingDevice::get_device_api_version() const {
 	return driver->get_api_version();
 }
 
+Dictionary RenderingDevice::get_raytracing_capabilities() const {
+	Dictionary info;
+	info["api"] = driver->get_api_name();
+	info["ray_query"] = driver->has_feature(SUPPORTS_RAY_QUERY);
+	info["raytracing_pipeline"] = driver->has_feature(SUPPORTS_RAYTRACING_PIPELINE);
+	driver->get_raytracing_info(info);
+	return info;
+}
+
 String RenderingDevice::get_device_pipeline_cache_uuid() const {
 	return driver->get_pipeline_cache_uuid();
 }
@@ -9220,6 +9230,7 @@ void RenderingDevice::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_device_vendor_name"), &RenderingDevice::get_device_vendor_name);
 	ClassDB::bind_method(D_METHOD("get_device_name"), &RenderingDevice::get_device_name);
 	ClassDB::bind_method(D_METHOD("get_device_pipeline_cache_uuid"), &RenderingDevice::get_device_pipeline_cache_uuid);
+	ClassDB::bind_method(D_METHOD("get_raytracing_capabilities"), &RenderingDevice::get_raytracing_capabilities);
 
 	ClassDB::bind_method(D_METHOD("get_memory_usage", "type"), &RenderingDevice::get_memory_usage);
 

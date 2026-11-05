@@ -34,6 +34,7 @@
 #include "core/config/project_settings.h"
 #include "core/os/os.h"
 #include "drivers/d3d12/amd_fsr_d3d12.h"
+#include "drivers/d3d12/dxc/d3d12_dxc_bridge.h"
 #include "drivers/d3d12/d3d12_hooks.h"
 #include "drivers/d3d12/rendering_context_driver_d3d12.h"
 
@@ -878,7 +879,8 @@ RDD::BufferID RenderingDeviceDriverD3D12::buffer_create(uint64_t p_size, BitFiel
 	CD3DX12_RESOURCE_DESC1 resource_desc = CD3DX12_RESOURCE_DESC1::Buffer(p_size);
 	if (p_usage.has_flag(RDD::BUFFER_USAGE_STORAGE_BIT)) {
 		resource_desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-	} else {
+	} else if (!p_usage.has_flag(RDD::BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT)) {
+		// Acceleration structure builds read their inputs as shader resources.
 		resource_desc.Flags |= D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
 	}
 
@@ -2103,6 +2105,19 @@ static void _rd_access_to_d3d12_and_mask(BitField<RDD::BarrierAccessBits> p_acce
 		r_sync_mask |= D3D12_BARRIER_SYNC_PIXEL_SHADING | D3D12_BARRIER_SYNC_ALL_SHADING;
 	}
 
+	if (p_access.has_flag(RDD::BARRIER_ACCESS_ACCELERATION_STRUCTURE_READ_BIT)) {
+		// Traversal by ray queries in any shader, or a TLAS build reading its BLASes.
+		r_access |= D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_READ;
+		r_sync_mask |= D3D12_BARRIER_SYNC_VERTEX_SHADING | D3D12_BARRIER_SYNC_PIXEL_SHADING | D3D12_BARRIER_SYNC_COMPUTE_SHADING | D3D12_BARRIER_SYNC_DRAW |
+				D3D12_BARRIER_SYNC_ALL_SHADING | D3D12_BARRIER_SYNC_RAYTRACING | D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE |
+				D3D12_BARRIER_SYNC_COPY_RAYTRACING_ACCELERATION_STRUCTURE;
+	}
+
+	if (p_access.has_flag(RDD::BARRIER_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT)) {
+		r_access |= D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_WRITE;
+		r_sync_mask |= D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE | D3D12_BARRIER_SYNC_COPY_RAYTRACING_ACCELERATION_STRUCTURE;
+	}
+
 	const D3D12_BARRIER_SYNC unordered_access_mask = D3D12_BARRIER_SYNC_VERTEX_SHADING | D3D12_BARRIER_SYNC_PIXEL_SHADING | D3D12_BARRIER_SYNC_COMPUTE_SHADING |
 			D3D12_BARRIER_SYNC_VERTEX_SHADING | D3D12_BARRIER_SYNC_DRAW | D3D12_BARRIER_SYNC_ALL_SHADING | D3D12_BARRIER_SYNC_CLEAR_UNORDERED_ACCESS_VIEW;
 
@@ -2122,7 +2137,9 @@ static void _rd_access_to_d3d12_and_mask(BitField<RDD::BarrierAccessBits> p_acce
 			r_sync_mask |= unordered_access_mask;
 		} else {
 			r_access |= D3D12_BARRIER_ACCESS_SHADER_RESOURCE;
-			r_sync_mask |= D3D12_BARRIER_SYNC_VERTEX_SHADING | D3D12_BARRIER_SYNC_PIXEL_SHADING | D3D12_BARRIER_SYNC_COMPUTE_SHADING | D3D12_BARRIER_SYNC_DRAW | D3D12_BARRIER_SYNC_ALL_SHADING;
+			// Acceleration structure builds read their vertex and index buffers as shader resources.
+			r_sync_mask |= D3D12_BARRIER_SYNC_VERTEX_SHADING | D3D12_BARRIER_SYNC_PIXEL_SHADING | D3D12_BARRIER_SYNC_COMPUTE_SHADING | D3D12_BARRIER_SYNC_DRAW | D3D12_BARRIER_SYNC_ALL_SHADING |
+					D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE;
 		}
 	}
 
@@ -2192,6 +2209,14 @@ static void _rd_stages_to_d3d12(BitField<RDD::PipelineStageBits> p_stages, D3D12
 
 		if (p_stages.has_flag(RDD::PIPELINE_STAGE_ALL_GRAPHICS_BIT)) {
 			r_sync |= D3D12_BARRIER_SYNC_DRAW;
+		}
+
+		if (p_stages.has_flag(RDD::PIPELINE_STAGE_RAY_TRACING_SHADER_BIT)) {
+			r_sync |= D3D12_BARRIER_SYNC_RAYTRACING;
+		}
+
+		if (p_stages.has_flag(RDD::PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT)) {
+			r_sync |= D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE;
 		}
 	}
 }
@@ -2279,7 +2304,7 @@ void RenderingDeviceDriverD3D12::command_pipeline_barrier(CommandBufferID p_cmd_
 		return;
 	}
 
-	if (p_memory_barriers.size() == 0 && p_buffer_barriers.size() == 0 && p_texture_barriers.size() == 0) {
+	if (p_memory_barriers.size() == 0 && p_buffer_barriers.size() == 0 && p_texture_barriers.size() == 0 && p_acceleration_structure_barriers.size() == 0) {
 		// At least one barrier must be present in the arguments.
 		return;
 	}
@@ -2309,6 +2334,16 @@ void RenderingDeviceDriverD3D12::command_pipeline_barrier(CommandBufferID p_cmd_
 		_rd_stages_and_access_to_d3d12(p_src_stages, RDD::TEXTURE_LAYOUT_MAX, buffer_barrier_rd.src_access, buffer_barrier_d3d12.SyncBefore, buffer_barrier_d3d12.AccessBefore);
 		_rd_stages_and_access_to_d3d12(p_dst_stages, RDD::TEXTURE_LAYOUT_MAX, buffer_barrier_rd.dst_access, buffer_barrier_d3d12.SyncAfter, buffer_barrier_d3d12.AccessAfter);
 		buffer_barrier_d3d12.pResource = buffer_info->resource;
+		buffer_barriers.push_back(buffer_barrier_d3d12);
+	}
+
+	// Acceleration structures live in buffers; their barriers are buffer barriers with acceleration structure access.
+	for (uint32_t i = 0; i < p_acceleration_structure_barriers.size(); i++) {
+		const AccelerationStructureBarrier &accel_barrier_rd = p_acceleration_structure_barriers[i];
+		const AccelerationStructureInfo *accel_info = (const AccelerationStructureInfo *)(accel_barrier_rd.acceleration_structure.id);
+		_rd_stages_and_access_to_d3d12(p_src_stages, RDD::TEXTURE_LAYOUT_MAX, accel_barrier_rd.src_access, buffer_barrier_d3d12.SyncBefore, buffer_barrier_d3d12.AccessBefore);
+		_rd_stages_and_access_to_d3d12(p_dst_stages, RDD::TEXTURE_LAYOUT_MAX, accel_barrier_rd.dst_access, buffer_barrier_d3d12.SyncAfter, buffer_barrier_d3d12.AccessAfter);
+		buffer_barrier_d3d12.pResource = accel_info->resource.Get();
 		buffer_barriers.push_back(buffer_barrier_d3d12);
 	}
 
@@ -3596,6 +3631,18 @@ RDD::UniformSetID RenderingDeviceDriverD3D12::uniform_set_create(VectorView<Boun
 					NeededState &ns = resource_states[texture_info];
 					ns.shader_uniform_idx_mask |= ((uint64_t)1 << i);
 					ns.states |= D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+				}
+			} break;
+			case UNIFORM_TYPE_ACCELERATION_STRUCTURE: {
+				// No resource: the view points at the structure's GPU address. Ray queries require enhanced barriers, so no state tracking.
+				for (uint32_t j = 0; j < uniform.ids.size(); j++) {
+					const AccelerationStructureInfo *accel_info = (const AccelerationStructureInfo *)uniform.ids[j].id;
+					D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+					srv_desc.Format = DXGI_FORMAT_UNKNOWN;
+					srv_desc.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+					srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+					srv_desc.RaytracingAccelerationStructure.Location = accel_info->gpu_virtual_address;
+					device->CreateShaderResourceView(nullptr, &srv_desc, get_cpu_handle(uniform_set_info->resource_descriptor_heap_alloc.cpu_handle, binding.resource_descriptor_offset + j, resource_descriptor_heap.increment_size));
 				}
 			} break;
 			default: {
@@ -5524,24 +5571,143 @@ RDD::PipelineID RenderingDeviceDriverD3D12::compute_pipeline_create(ShaderID p_s
 
 // ---- ACCELERATION STRUCTURES ----
 
+static D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS _rd_to_d3d12_as_build_flags(BitField<RDD::AccelerationStructureFlagBits> p_flags) {
+	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE;
+	if (p_flags.has_flag(RDD::ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT)) {
+		flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
+	}
+	if (p_flags.has_flag(RDD::ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT)) {
+		flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_COMPACTION;
+	}
+	if (p_flags.has_flag(RDD::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT)) {
+		flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+	}
+	if (p_flags.has_flag(RDD::ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT)) {
+		flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+	}
+	if (p_flags.has_flag(RDD::ACCELERATION_STRUCTURE_LOW_MEMORY_BIT)) {
+		flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_MINIMIZE_MEMORY;
+	}
+	return flags;
+}
+
+RenderingDeviceDriverD3D12::AccelerationStructureInfo *RenderingDeviceDriverD3D12::_acceleration_structure_allocate(const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS &p_inputs) {
+	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO prebuild = {};
+	device_5->GetRaytracingAccelerationStructurePrebuildInfo(&p_inputs, &prebuild);
+	ERR_FAIL_COND_V_MSG(prebuild.ResultDataMaxSizeInBytes == 0, nullptr, "The acceleration structure inputs were rejected by the driver.");
+
+	uint64_t size = STEPIFY(prebuild.ResultDataMaxSizeInBytes, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT);
+	CD3DX12_RESOURCE_DESC1 resource_desc = CD3DX12_RESOURCE_DESC1::Buffer(size);
+	resource_desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS | D3D12_RESOURCE_FLAG_RAYTRACING_ACCELERATION_STRUCTURE;
+
+	D3D12MA::ALLOCATION_DESC allocation_desc = {};
+	allocation_desc.HeapType = D3D12_HEAP_TYPE_DEFAULT;
+
+	ComPtr<ID3D12Resource> resource;
+	ComPtr<D3D12MA::Allocation> allocation;
+	// Ray query support requires enhanced barriers, so the structure is created with the layout-less buffer API.
+	HRESULT res = allocator->CreateResource3(&allocation_desc, &resource_desc, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, 0, nullptr, allocation.GetAddressOf(), IID_PPV_ARGS(resource.GetAddressOf()));
+	ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), nullptr, "Can't create acceleration structure of size: " + itos(size) + ", error " + vformat("0x%08ux", (uint64_t)res) + ".");
+
+	AccelerationStructureInfo *info = memnew(AccelerationStructureInfo);
+	info->resource = resource;
+	info->allocation = allocation;
+	info->gpu_virtual_address = resource->GetGPUVirtualAddress();
+	info->size = size;
+	info->scratch_size = STEPIFY(MAX(prebuild.ScratchDataSizeInBytes, prebuild.UpdateScratchDataSizeInBytes), D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT);
+	info->inputs = p_inputs;
+	return info;
+}
+
 RDD::AccelerationStructureID RenderingDeviceDriverD3D12::blas_create(VectorView<AccelerationStructureGeometry> p_geometries, BitField<AccelerationStructureFlagBits> p_flags) {
-	ERR_FAIL_V_MSG(AccelerationStructureID(), "Ray tracing is not currently supported by the D3D12 driver.");
+	ERR_FAIL_COND_V_MSG(!raytracing_capabilities.ray_query_supported, AccelerationStructureID(), "Ray tracing is not supported by this Direct3D 12 device.");
+
+	LocalVector<D3D12_RAYTRACING_GEOMETRY_DESC> geometries;
+	geometries.resize(p_geometries.size());
+	for (uint32_t i = 0; i < p_geometries.size(); i++) {
+		const AccelerationStructureGeometry &g = p_geometries[i];
+		D3D12_RAYTRACING_GEOMETRY_DESC &desc = geometries[i];
+		desc = {};
+		desc.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+		if (g.flags.has_flag(ACCELERATION_STRUCTURE_GEOMETRY_OPAQUE_BIT)) {
+			desc.Flags |= D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+		}
+		if (g.flags.has_flag(ACCELERATION_STRUCTURE_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT)) {
+			desc.Flags |= D3D12_RAYTRACING_GEOMETRY_FLAG_NO_DUPLICATE_ANYHIT_INVOCATION;
+		}
+
+		const BufferInfo *vertex_buffer = (const BufferInfo *)g.vertex_buffer.id;
+		desc.Triangles.VertexBuffer.StartAddress = vertex_buffer->gpu_virtual_address + g.vertex_offset;
+		desc.Triangles.VertexBuffer.StrideInBytes = g.vertex_stride;
+		desc.Triangles.VertexCount = g.vertex_count;
+		desc.Triangles.VertexFormat = RD_TO_D3D12_FORMAT[g.vertex_format].general_format;
+		ERR_FAIL_COND_V_MSG(desc.Triangles.VertexFormat == DXGI_FORMAT_UNKNOWN, AccelerationStructureID(), "Unsupported vertex format for an acceleration structure.");
+
+		if (g.index_buffer) {
+			const BufferInfo *index_buffer = (const BufferInfo *)g.index_buffer.id;
+			desc.Triangles.IndexBuffer = index_buffer->gpu_virtual_address + g.index_offset;
+			desc.Triangles.IndexCount = g.index_count;
+			desc.Triangles.IndexFormat = g.index_format == INDEX_BUFFER_FORMAT_UINT16 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT;
+		}
+	}
+
+	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {};
+	inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+	inputs.Flags = _rd_to_d3d12_as_build_flags(p_flags);
+	inputs.NumDescs = geometries.size();
+	inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+	inputs.pGeometryDescs = geometries.ptr();
+
+	AccelerationStructureInfo *info = _acceleration_structure_allocate(inputs);
+	ERR_FAIL_NULL_V(info, AccelerationStructureID());
+	info->geometries = std::move(geometries);
+	info->inputs.pGeometryDescs = info->geometries.ptr();
+	return AccelerationStructureID(info);
 }
 
 RDD::AccelerationStructureID RenderingDeviceDriverD3D12::tlas_create(uint32_t p_max_instance_count, BitField<AccelerationStructureFlagBits> p_flags) {
-	ERR_FAIL_V_MSG(AccelerationStructureID(), "Ray tracing is not currently supported by the D3D12 driver.");
+	ERR_FAIL_COND_V_MSG(!raytracing_capabilities.ray_query_supported, AccelerationStructureID(), "Ray tracing is not supported by this Direct3D 12 device.");
+
+	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {};
+	inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+	inputs.Flags = _rd_to_d3d12_as_build_flags(p_flags);
+	inputs.NumDescs = MAX(1u, p_max_instance_count);
+	inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+
+	AccelerationStructureInfo *info = _acceleration_structure_allocate(inputs);
+	ERR_FAIL_NULL_V(info, AccelerationStructureID());
+	info->max_instance_count = p_max_instance_count;
+	return AccelerationStructureID(info);
 }
 
 void RenderingDeviceDriverD3D12::acceleration_structure_instance_write(uint8_t *r_driver_instance, const AccelerationStructureInstance &p_instance) {
-	ERR_FAIL_MSG("Ray tracing is not currently supported by the D3D12 driver.");
+	D3D12_RAYTRACING_INSTANCE_DESC *desc = (D3D12_RAYTRACING_INSTANCE_DESC *)r_driver_instance;
+	for (int r = 0; r < 3; r++) {
+		for (int c = 0; c < 3; c++) {
+			desc->Transform[r][c] = p_instance.transform.basis.rows[r][c];
+		}
+		desc->Transform[r][3] = p_instance.transform.origin[r];
+	}
+	desc->InstanceID = p_instance.id & 0xffffff;
+	desc->InstanceMask = p_instance.mask;
+	desc->InstanceContributionToHitGroupIndex = p_instance.hit_sbt_offset & 0xffffff;
+	// The RD instance flag bits have the same values as D3D12_RAYTRACING_INSTANCE_FLAGS.
+	static_assert(uint32_t(ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT) == uint32_t(D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE));
+	static_assert(uint32_t(ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FLIP_FACING_BIT) == uint32_t(D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_FRONT_COUNTERCLOCKWISE));
+	static_assert(uint32_t(ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT) == uint32_t(D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE));
+	static_assert(uint32_t(ACCELERATION_STRUCTURE_INSTANCE_FORCE_NO_OPAQUE_BIT) == uint32_t(D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_NON_OPAQUE));
+	desc->Flags = uint32_t(p_instance.flags) & 0xff;
+	desc->AccelerationStructure = p_instance.blas ? ((const AccelerationStructureInfo *)p_instance.blas.id)->gpu_virtual_address : 0;
 }
 
 void RenderingDeviceDriverD3D12::acceleration_structure_free(AccelerationStructureID p_acceleration_structure) {
-	ERR_FAIL_MSG("Ray tracing is not currently supported by the D3D12 driver.");
+	AccelerationStructureInfo *info = (AccelerationStructureInfo *)p_acceleration_structure.id;
+	memdelete(info);
 }
 
 uint32_t RenderingDeviceDriverD3D12::acceleration_structure_get_scratch_size_bytes(AccelerationStructureID p_acceleration_structure) {
-	ERR_FAIL_V_MSG(0, "Ray tracing is not currently supported by the D3D12 driver.");
+	const AccelerationStructureInfo *info = (const AccelerationStructureInfo *)p_acceleration_structure.id;
+	return info->scratch_size;
 }
 
 // ----- PIPELINE -----
@@ -5561,11 +5727,30 @@ bool RenderingDeviceDriverD3D12::raytracing_pipeline_get_shader_group_handles(Ra
 // ----- COMMANDS -----
 
 void RenderingDeviceDriverD3D12::command_build_blas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer) {
-	ERR_FAIL_MSG("Ray tracing is not currently supported by the D3D12 driver.");
+	const CommandBufferInfo *cmd_buf_info = (const CommandBufferInfo *)p_cmd_buffer.id;
+	const AccelerationStructureInfo *info = (const AccelerationStructureInfo *)p_acceleration_structure.id;
+	const BufferInfo *scratch = (const BufferInfo *)p_scratch_buffer.id;
+
+	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC desc = {};
+	desc.DestAccelerationStructureData = info->gpu_virtual_address;
+	desc.Inputs = info->inputs;
+	desc.ScratchAccelerationStructureData = scratch->gpu_virtual_address;
+	cmd_buf_info->cmd_list_5->BuildRaytracingAccelerationStructure(&desc, 0, nullptr);
 }
 
 void RenderingDeviceDriverD3D12::command_build_tlas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer, BufferID p_instance_buffer, uint32_t p_instance_offset, uint32_t p_instance_count) {
-	ERR_FAIL_MSG("Ray tracing is not currently supported by the D3D12 driver.");
+	const CommandBufferInfo *cmd_buf_info = (const CommandBufferInfo *)p_cmd_buffer.id;
+	const AccelerationStructureInfo *info = (const AccelerationStructureInfo *)p_acceleration_structure.id;
+	const BufferInfo *scratch = (const BufferInfo *)p_scratch_buffer.id;
+	const BufferInfo *instances = (const BufferInfo *)p_instance_buffer.id;
+
+	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC desc = {};
+	desc.DestAccelerationStructureData = info->gpu_virtual_address;
+	desc.Inputs = info->inputs;
+	desc.Inputs.NumDescs = p_instance_count;
+	desc.Inputs.InstanceDescs = instances->gpu_virtual_address + p_instance_offset;
+	desc.ScratchAccelerationStructureData = scratch->gpu_virtual_address;
+	cmd_buf_info->cmd_list_5->BuildRaytracingAccelerationStructure(&desc, 0, nullptr);
 }
 
 void RenderingDeviceDriverD3D12::command_bind_raytracing_pipeline(CommandBufferID p_cmd_buffer, RaytracingPipelineID p_pipeline) {
@@ -5886,6 +6071,14 @@ uint64_t RenderingDeviceDriverD3D12::api_trait_get(ApiTrait p_trait) {
 			return !barrier_capabilities.enhanced_barriers_supported;
 		case API_TRAIT_TEXTURE_OUTPUTS_REQUIRE_CLEARS:
 			return true;
+		case API_TRAIT_ACCELERATION_STRUCTURE_INSTANCE_SIZE:
+			return sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
+		case API_TRAIT_SHADER_GROUP_HANDLE_SIZE:
+			return D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES;
+		case API_TRAIT_SHADER_GROUP_HANDLE_ALIGNMENT:
+			return D3D12_RAYTRACING_SHADER_RECORD_BYTE_ALIGNMENT;
+		case API_TRAIT_SHADER_GROUP_BASE_ALIGNMENT:
+			return D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT;
 		default:
 			return RenderingDeviceDriver::api_trait_get(p_trait);
 	}
@@ -5907,9 +6100,46 @@ bool RenderingDeviceDriverD3D12::has_feature(Features p_feature) {
 			return false;
 		case SUPPORTS_HDR_OUTPUT:
 			return true;
+		case SUPPORTS_RAY_QUERY:
+			return raytracing_capabilities.ray_query_supported;
+		case SUPPORTS_RAYTRACING_PIPELINE:
+			// State objects need DXIL libraries, which the SPIR-V to HLSL path cannot produce yet.
+			return false;
 		default:
 			return false;
 	}
+}
+
+void RenderingDeviceDriverD3D12::get_raytracing_info(Dictionary &r_info) const {
+	String tier = "not_supported";
+	switch (raytracing_capabilities.tier) {
+		case D3D12_RAYTRACING_TIER_1_0:
+			tier = "1.0";
+			break;
+		case D3D12_RAYTRACING_TIER_1_1:
+			tier = "1.1";
+			break;
+		case D3D12_RAYTRACING_TIER_1_2:
+			tier = "1.2";
+			break;
+		case D3D12_RAYTRACING_TIER_2_0:
+			tier = "2.0";
+			break;
+		default:
+			break;
+	}
+	r_info["d3d12_raytracing_tier"] = tier;
+	r_info["d3d12_shader_model"] = vformat("%d.%d", shader_capabilities.shader_model >> 4, shader_capabilities.shader_model & 0xf);
+	r_info["d3d12_enhanced_barriers"] = barrier_capabilities.enhanced_barriers_supported;
+	r_info["d3d12_agility_sdk_version"] = GLOBAL_GET("rendering/rendering_device/d3d12/agility_sdk_version");
+	r_info["d3d12_agility_sdk_loaded"] = context_driver->device_factory_get() != nullptr;
+	r_info["d3d12_raytracing_preview_enabled"] = raytracing_capabilities.raytracing_preview_enabled;
+	r_info["d3d12_options_raytracing2_queried"] = raytracing_capabilities.options_raytracing2_queried;
+	r_info["d3d12_clusters_and_ptlas_supported"] = raytracing_capabilities.clusters_and_ptlas_supported;
+	r_info["d3d12_template_instance_prefers_compressed1"] = raytracing_capabilities.template_instance_prefers_compressed1;
+	r_info["d3d12_ser_actually_reorders"] = raytracing_capabilities.shader_execution_reordering_actually_reorders;
+	r_info["dxc_available"] = raytracing_capabilities.dxc_available;
+	r_info["dxc_version"] = String::utf8(d3d12_dxc_get_version().c_str());
 }
 
 const RDD::MultiviewCapabilities &RenderingDeviceDriverD3D12::get_multiview_capabilities() {
@@ -6010,8 +6240,21 @@ Error RenderingDeviceDriverD3D12::_initialize_device() {
 		PFN_D3D12_ENABLE_EXPERIMENTAL_FEATURES d3d_D3D12EnableExperimentalFeatures = (PFN_D3D12_ENABLE_EXPERIMENTAL_FEATURES)(void *)GetProcAddress(context_driver->lib_d3d12, "D3D12EnableExperimentalFeatures");
 		ERR_FAIL_NULL_V(d3d_D3D12EnableExperimentalFeatures, ERR_CANT_CREATE);
 
-		UUID experimental_features[] = { D3D12ExperimentalShaderModels };
-		d3d_D3D12EnableExperimentalFeatures(1, experimental_features, nullptr, nullptr);
+		// D3D12RaytracingPreview unlocks the Agility SDK 1.722 DXR preview (clustered geometry, partitioned TLAS,
+		// indirect builds). Runtimes that do not know it refuse the whole call, so retry without it.
+		const bool want_raytracing_preview = GLOBAL_GET("rendering/rendering_device/d3d12/raytracing_preview");
+		UUID experimental_features[] = { D3D12ExperimentalShaderModels, D3D12RaytracingPreview };
+		const UINT feature_count = want_raytracing_preview ? 2 : 1;
+		ID3D12DeviceFactory *factory = context_driver->device_factory_get();
+		HRESULT hr_features = factory ? factory->EnableExperimentalFeatures(feature_count, experimental_features, nullptr, nullptr) : d3d_D3D12EnableExperimentalFeatures(feature_count, experimental_features, nullptr, nullptr);
+		raytracing_capabilities.raytracing_preview_enabled = want_raytracing_preview && SUCCEEDED(hr_features);
+		if (FAILED(hr_features) && feature_count > 1) {
+			if (factory) {
+				factory->EnableExperimentalFeatures(1, experimental_features, nullptr, nullptr);
+			} else {
+				d3d_D3D12EnableExperimentalFeatures(1, experimental_features, nullptr, nullptr);
+			}
+		}
 	}
 
 	D3D_FEATURE_LEVEL requested_feature_level = D3D_FEATURE_LEVEL_11_0;
@@ -6149,6 +6392,10 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 
 	{
 		static const D3D_SHADER_MODEL SMS_TO_CHECK[] = {
+			D3D_SHADER_MODEL_6_10,
+			D3D_SHADER_MODEL_6_9,
+			D3D_SHADER_MODEL_6_8,
+			D3D_SHADER_MODEL_6_7,
 			D3D_SHADER_MODEL_6_6,
 			D3D_SHADER_MODEL_6_5,
 			D3D_SHADER_MODEL_6_4,
@@ -6246,6 +6493,57 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 	res = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS19, &options19, sizeof(options19));
 	if (SUCCEEDED(res)) {
 		sampler_capabilities.aniso_filter_with_point_mip_supported = options19.AnisoFilterWithPointMipSupported;
+	}
+
+	// Ray tracing (DXR).
+	D3D12_FEATURE_DATA_D3D12_OPTIONS5 options5 = {};
+	res = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &options5, sizeof(options5));
+	if (SUCCEEDED(res)) {
+		raytracing_capabilities.tier = options5.RaytracingTier;
+	}
+
+	D3D12_FEATURE_DATA_D3D12_OPTIONS22 options22 = {};
+	res = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS22, &options22, sizeof(options22));
+	if (SUCCEEDED(res)) {
+		raytracing_capabilities.shader_execution_reordering_actually_reorders = options22.ShaderExecutionReorderingActuallyReorders;
+	}
+
+	{
+		// Clustered geometry, partitioned TLAS and indirect builds (Agility SDK 1.722 preview).
+		ComPtr<ID3D12Device16> device_16;
+		if (SUCCEEDED(device.As(&device_16))) {
+			D3D12_FEATURE_DATA_D3D12_OPTIONS_RAYTRACING2 options_rt2 = {};
+			res = device_16->CheckFeatureSupport1(D3D12_FEATURE_D3D12_OPTIONS_RAYTRACING2, &options_rt2, sizeof(options_rt2), D3D12_PREVIEW_SDK_VERSION);
+			if (SUCCEEDED(res)) {
+				raytracing_capabilities.options_raytracing2_queried = true;
+				raytracing_capabilities.clusters_and_ptlas_supported = options_rt2.ClustersAndPTLASSupported;
+				raytracing_capabilities.template_instance_prefers_compressed1 = options_rt2.TemplateInstancePrefersCOMPRESSED1;
+			}
+		}
+	}
+
+	if (raytracing_capabilities.tier >= D3D12_RAYTRACING_TIER_1_0) {
+		device.As(&device_5);
+	}
+	raytracing_capabilities.dxc_available = d3d12_dxc_is_available();
+	raytracing_capabilities.ray_query_supported = raytracing_capabilities.tier >= D3D12_RAYTRACING_TIER_1_1 &&
+			shader_capabilities.shader_model >= D3D_SHADER_MODEL_6_5 &&
+			barrier_capabilities.enhanced_barriers_supported &&
+			raytracing_capabilities.dxc_available &&
+			device_5 != nullptr;
+
+	{
+		Dictionary info;
+		get_raytracing_info(info);
+		String why;
+		if (!raytracing_capabilities.ray_query_supported && raytracing_capabilities.tier >= D3D12_RAYTRACING_TIER_1_1) {
+			why = !raytracing_capabilities.dxc_available ? " (dxcompiler.dll not found)" : (!barrier_capabilities.enhanced_barriers_supported ? " (no enhanced barriers)" : "");
+		}
+		print_line(vformat("D3D12 DXR: tier %s, shader model %s, inline ray tracing %s%s, clusters and partitioned TLAS %s%s.",
+				info["d3d12_raytracing_tier"], info["d3d12_shader_model"],
+				raytracing_capabilities.ray_query_supported ? "on (DXC " + String(info["dxc_version"]) + ")" : "off", why,
+				raytracing_capabilities.clusters_and_ptlas_supported ? "yes" : "no",
+				raytracing_capabilities.raytracing_preview_enabled ? "" : " (D3D12RaytracingPreview not enabled)"));
 	}
 
 	if (fsr_capabilities.pipeline_supported || fsr_capabilities.primitive_supported || fsr_capabilities.attachment_supported) {
