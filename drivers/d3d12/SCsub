@@ -182,7 +182,9 @@ env_thirdparty.add_source_files(thirdparty_obj, "#thirdparty/d3d12ma/D3D12MemAll
 env_dxc = env.Clone()
 if env.msvc:
     env_dxc["CPPDEFINES"] = [
-        d for d in env_dxc["CPPDEFINES"] if not (d == "_HAS_EXCEPTIONS" or (isinstance(d, tuple) and d[0] == "_HAS_EXCEPTIONS"))
+        d
+        for d in env_dxc["CPPDEFINES"]
+        if not (d == "_HAS_EXCEPTIONS" or (isinstance(d, tuple) and d[0] == "_HAS_EXCEPTIONS"))
     ]
     env_dxc.Append(CXXFLAGS=["/EHsc"])
 else:

@@ -35,10 +35,9 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
-#include <unknwn.h>
-#include <wrl/client.h>
-
 #include <dxcapi.h>
+#include <objbase.h>
+#include <wrl/client.h>
 
 #include <mutex>
 
