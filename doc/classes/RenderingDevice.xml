@@ -689,6 +689,13 @@
 				Returns a string with a performance report from the past frame. Updates every frame.
 			</description>
 		</method>
+		<method name="get_raytracing_capabilities" qualifiers="const">
+			<return type="Dictionary" />
+			<description>
+				Returns a dictionary describing the device's ray tracing support. Always present: [code]api[/code] ([String]), [code]ray_query[/code] and [code]raytracing_pipeline[/code] ([bool], the same as [method has_feature] with [constant SUPPORTS_RAY_QUERY] and [constant SUPPORTS_RAYTRACING_PIPELINE]). The Direct3D 12 driver adds [code]d3d12_raytracing_tier[/code], [code]d3d12_shader_model[/code], [code]d3d12_enhanced_barriers[/code], [code]d3d12_agility_sdk_version[/code], [code]d3d12_agility_sdk_loaded[/code], [code]d3d12_raytracing_preview_enabled[/code], [code]d3d12_options_raytracing2_queried[/code], [code]d3d12_clusters_and_ptlas_supported[/code], [code]d3d12_template_instance_prefers_compressed1[/code], [code]d3d12_ser_actually_reorders[/code], [code]dxc_available[/code] and [code]dxc_version[/code].
+				On Direct3D 12, compute shaders that use inline ray tracing ([code]GL_EXT_ray_query[/code]) are translated to HLSL and compiled with the DirectX Shader Compiler, which must be present as [code]dxcompiler.dll[/code] next to the executable.
+			</description>
+		</method>
 		<method name="get_tracked_object_name" qualifiers="const">
 			<return type="String" />
 			<param index="0" name="type_index" type="int" />

@@ -186,10 +186,25 @@ Patches:
 - `0001-mingw-support.patch` ([GH-83452](https://github.com/godotengine/godot/pull/83452))
 
 
+## dxc
+
+- Upstream: https://github.com/microsoft/DirectXShaderCompiler
+- Version: 1.10.2605.37 (c4d8f4f99, 2026), Shader Model 6.10 preview, patch 2
+- License: University of Illinois/NCSA
+
+Files extracted from upstream release `dxc_2026_08_11.zip`:
+
+- `inc/dxcapi.h` as `include/dxcapi.h`
+- `LICENSE-LLVM.txt` as `LICENSE.TXT`
+
+The compiler itself (`dxcompiler.dll`, `dxil.dll`) is fetched by `misc/scripts/install_d3d12_sdk_windows.py`
+and loaded at runtime.
+
+
 ## directx_headers
 
 - Upstream: https://github.com/microsoft/DirectX-Headers
-- Version: main (25411c74bb9cc7c416b2ff01b3ad8a306811dfdd, 2025)
+- Version: 1.722.0-preview (32a2990daa0471a256692496c07e0ba13c2bcb57, 2026), matching the Agility SDK 1.722.0-preview
 - License: MIT
 
 Files extracted from upstream source:
@@ -1049,7 +1064,8 @@ Patches:
 
 Files extracted from upstream source:
 
-- All `.cpp`, `.hpp` and `.h` files, minus `main.cpp`, `spirv.h*`, `spirv_cross_c.*`, `spirv_hlsl.*`, `spirv_cpp.*`
+- All `.cpp`, `.hpp` and `.h` files, minus `main.cpp`, `spirv.h*`, `spirv_cross_c.*`, `spirv_cpp.*`
+  (`spirv_hlsl.*` is used by the Direct3D 12 driver for ray-query shaders)
 - `include/` folder
 - `LICENSE` and `LICENSES/` folder, minus `CC-BY-4.0.txt`
 

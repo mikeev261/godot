@@ -952,6 +952,9 @@ public:
 
 	virtual DriverWorkarounds get_driver_workarounds() const { return DriverWorkarounds(); }
 
+	// API-specific ray tracing details (tiers, preview features, compiler) for diagnostics.
+	virtual void get_raytracing_info(Dictionary &r_info) const {}
+
 	/******************/
 
 	virtual ~RenderingDeviceDriver();
